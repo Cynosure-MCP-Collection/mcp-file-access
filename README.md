@@ -25,6 +25,7 @@ On Windows, use `;` as the separator.
 - `read_text_file`
 - `read_multiple_files`
 - `read_media_file`
+- `read_multiple_media_files`
 - `get_image_thumbnails`
 - `write_file`
 - `edit_file`
@@ -34,3 +35,5 @@ On Windows, use `;` as the separator.
 - `delete_directory`
 
 Common generated and dependency folders such as `node_modules`, `.git`, `dist`, `build`, `.next`, and cache directories are excluded from traversal by default.
+
+`read_multiple_media_files` accepts 1-6 image paths and returns a single PNG collage/contact sheet with file-name captions, which is useful for compact visual comparison and classification.

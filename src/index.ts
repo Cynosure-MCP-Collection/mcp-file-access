@@ -289,6 +289,89 @@ function isImagePath(filePath: string): boolean {
     return path.extname(filePath).toLowerCase() in IMAGE_MIME_BY_EXT;
 }
 
+function escapeXml(value: string): string {
+    return value
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+    if (value.length <= maxLength) return value;
+    const side = Math.floor((maxLength - 3) / 2);
+    return `${value.slice(0, side)}...${value.slice(value.length - side)}`;
+}
+
+function captionSvg(width: number, height: number, title: string, index: number): Buffer {
+    const label = escapeXml(`${index}. ${truncateMiddle(title, 44)}`);
+    return Buffer.from(`
+        <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#f7f7f7"/>
+            <text x="12" y="28" font-family="Arial, Helvetica, sans-serif" font-size="18" font-weight="600" fill="#222">${label}</text>
+        </svg>
+    `);
+}
+
+async function createImageCollage(paths: string[], tileSize: number): Promise<{ data: Buffer; width: number; height: number; files: Array<{ name: string; path: string }> }> {
+    if (paths.length < 1 || paths.length > 6) throw new Error('read_multiple_media_files supports 1 to 6 images per call.');
+
+    const absPaths = [];
+    for (const filePath of paths) {
+        const absPath = await resolveAllowedPath(filePath);
+        if (!isImagePath(absPath)) throw new Error(`Not a supported image file: ${filePath}`);
+        absPaths.push(absPath);
+    }
+
+    const columns = Math.min(3, absPaths.length);
+    const rows = Math.ceil(absPaths.length / columns);
+    const margin = 24;
+    const gap = 18;
+    const captionHeight = 46;
+    const cellWidth = tileSize;
+    const imageHeight = tileSize;
+    const cellHeight = imageHeight + captionHeight;
+    const width = margin * 2 + columns * cellWidth + (columns - 1) * gap;
+    const height = margin * 2 + rows * cellHeight + (rows - 1) * gap;
+    const composites: sharp.OverlayOptions[] = [];
+    const files: Array<{ name: string; path: string }> = [];
+
+    for (let i = 0; i < absPaths.length; i++) {
+        const absPath = absPaths[i];
+        const col = i % columns;
+        const row = Math.floor(i / columns);
+        const left = margin + col * (cellWidth + gap);
+        const top = margin + row * (cellHeight + gap);
+
+        const image = await sharp(absPath)
+            .rotate()
+            .resize({ width: cellWidth, height: imageHeight, fit: 'inside', withoutEnlargement: true })
+            .png()
+            .toBuffer({ resolveWithObject: true });
+
+        const imageLeft = left + Math.floor((cellWidth - image.info.width) / 2);
+        const imageTop = top + Math.floor((imageHeight - image.info.height) / 2);
+        composites.push({ input: image.data, left: imageLeft, top: imageTop });
+        composites.push({ input: captionSvg(cellWidth, captionHeight, path.basename(absPath), i + 1), left, top: top + imageHeight });
+        files.push({ name: path.basename(absPath), path: absPath });
+    }
+
+    const data = await sharp({
+        create: {
+            width,
+            height,
+            channels: 4,
+            background: '#ffffff',
+        },
+    })
+        .composite(composites)
+        .png()
+        .toBuffer();
+
+    return { data, width, height, files };
+}
+
 function unifiedDiff(original: string, updated: string): string {
     const before = original.split(/\r?\n/);
     const after = updated.split(/\r?\n/);
@@ -536,6 +619,38 @@ server.registerTool(
             return { content };
         } catch (err) {
             return errorResult('Failed to create thumbnails', err);
+        }
+    },
+);
+
+server.registerTool(
+    'read_multiple_media_files',
+    {
+        description: 'Read up to 6 image files as one medium PNG collage/contact sheet with each file name captioned for comparison or classification.',
+        inputSchema: {
+            paths: z.array(z.string()).min(1).max(6).describe('Image file paths to include in the collage. Supports PNG, JPEG, WebP, GIF, AVIF, TIFF, BMP, and SVG when supported by sharp.'),
+            tileSize: z.number().int().min(160).max(512).optional().describe('Maximum image tile width/height in pixels. Defaults to 320.'),
+        },
+    },
+    async ({ paths, tileSize }) => {
+        try {
+            const collage = await createImageCollage(paths, tileSize ?? 320);
+            return {
+                content: [
+                    {
+                        type: 'text',
+                        text: JSON.stringify({
+                            mimeType: 'image/png',
+                            width: collage.width,
+                            height: collage.height,
+                            files: collage.files,
+                        }, null, 2),
+                    },
+                    { type: 'image', data: collage.data.toString('base64'), mimeType: 'image/png' },
+                ],
+            };
+        } catch (err) {
+            return errorResult('Failed to read multiple media files', err);
         }
     },
 );
