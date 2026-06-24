@@ -3,9 +3,12 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { promises as fs } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import * as path from 'node:path';
 import { EOL } from 'node:os';
 import sharp from 'sharp';
+import { ZipArchive } from 'archiver';
+import unzipper from 'unzipper';
 
 type SortBy = 'name' | 'size' | 'modified';
 
@@ -388,18 +391,299 @@ function unifiedDiff(original: string, updated: string): string {
     return lines.join('\n');
 }
 
+function errorCode(err: unknown): string | undefined {
+    if (typeof err === 'object' && err !== null && 'code' in err && typeof err.code === 'string') {
+        return err.code;
+    }
+    return undefined;
+}
+
+function errorHints(prefix: string, err: unknown): string[] {
+    const code = errorCode(err);
+    const message = err instanceof Error ? err.message : String(err);
+    const hints: string[] = [];
+
+    if (code === 'ENOENT') hints.push('Verify the path exists and is spelled correctly.');
+    if (code === 'EACCES' || code === 'EPERM') hints.push('Check filesystem permissions for the source and destination.');
+    if (code === 'EEXIST') hints.push('Choose a different destination, or explicitly enable overwrite when the tool supports it.');
+    if (code === 'ENOTDIR') hints.push('A path component expected to be a directory is a file.');
+    if (code === 'EISDIR') hints.push('The supplied path is a directory; use the corresponding directory tool.');
+    if (code === 'ENOTEMPTY') hints.push('The destination or directory is not empty. Use the tool’s merge/recursive option if appropriate.');
+    if (message.includes('outside allowed directories') || message.includes('Access denied')) {
+        hints.push('Call list_allowed_directories and use a path inside one of the returned roots.');
+    }
+    if (prefix.includes('delete directory')) {
+        hints.push('Path-only deletion is safe for empty directories. For a non-empty directory, retry with {"path":"...","recursive":true}.');
+    }
+    if (prefix.includes('move file')) {
+        hints.push('move_file accepts files only. To move, rename, or merge a directory, use move_directory.');
+    }
+    if (prefix.includes('move directory')) {
+        hints.push('If the destination exists, it must be a directory. Merging is conflict-safe unless overwrite is explicitly true.');
+    }
+    if (prefix.includes('zip archive')) {
+        hints.push('Use .zip paths inside an allowed directory and ensure input paths have distinct top-level names.');
+    }
+
+    return [...new Set(hints)];
+}
+
 function errorResult(prefix: string, err: unknown) {
+    const code = errorCode(err);
+    const hints = errorHints(prefix.toLowerCase(), err);
+    const details = [
+        `${prefix}: ${err instanceof Error ? err.message : String(err)}`,
+        code ? `Error code: ${code}` : undefined,
+        hints.length > 0 ? `How to fix:\n${hints.map(hint => `- ${hint}`).join('\n')}` : undefined,
+    ].filter(Boolean);
     return {
-        content: [{ type: 'text' as const, text: `${prefix}: ${err instanceof Error ? err.message : String(err)}` }],
+        content: [{ type: 'text' as const, text: details.join('\n') }],
         isError: true,
     };
 }
 
+async function pathExists(candidate: string): Promise<boolean> {
+    try {
+        await fs.lstat(candidate);
+        return true;
+    } catch (err) {
+        if (errorCode(err) === 'ENOENT') return false;
+        throw err;
+    }
+}
+
+async function assertPathType(candidate: string, expected: 'file' | 'directory'): Promise<void> {
+    const stats = await fs.lstat(candidate);
+    const matches = expected === 'file' ? stats.isFile() : stats.isDirectory();
+    if (!matches) {
+        throw new Error(`Source path is not a ${expected}. ${expected === 'file' ? 'Use move_directory for directories.' : 'Use move_file for files.'}`);
+    }
+}
+
+function assertNotNested(source: string, destination: string): void {
+    if (isWithin(source, destination)) {
+        throw new Error('Destination cannot be the source directory itself or a location inside it.');
+    }
+}
+
+async function copyFileSafely(source: string, destination: string, overwrite: boolean): Promise<void> {
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    await fs.copyFile(source, destination, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
+}
+
+async function moveFilePath(source: string, destination: string, overwrite: boolean): Promise<string> {
+    const destinationExists = await pathExists(destination);
+    if (destinationExists) {
+        const destinationStats = await fs.lstat(destination);
+        if (destinationStats.isDirectory()) {
+            destination = path.join(destination, path.basename(source));
+        }
+    }
+
+    if (await pathExists(destination)) {
+        const destinationStats = await fs.lstat(destination);
+        if (!destinationStats.isFile()) throw new Error(`Destination exists and is not a file: ${destination}`);
+        if (!overwrite) throw Object.assign(new Error(`Destination file already exists: ${destination}`), { code: 'EEXIST' });
+        await fs.rm(destination);
+    }
+
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    try {
+        await fs.rename(source, destination);
+    } catch (err) {
+        if (errorCode(err) !== 'EXDEV') throw err;
+        await copyFileSafely(source, destination, overwrite);
+        await fs.unlink(source);
+    }
+    return destination;
+}
+
+async function collectMergeConflicts(source: string, destination: string, conflicts: string[]): Promise<void> {
+    for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+        const sourceChild = path.join(source, entry.name);
+        const destinationChild = path.join(destination, entry.name);
+        if (!await pathExists(destinationChild)) continue;
+
+        const sourceStats = await fs.lstat(sourceChild);
+        const destinationStats = await fs.lstat(destinationChild);
+        if (sourceStats.isDirectory() && destinationStats.isDirectory()) {
+            await collectMergeConflicts(sourceChild, destinationChild, conflicts);
+        } else {
+            conflicts.push(destinationChild);
+        }
+    }
+}
+
+async function mergeDirectory(source: string, destination: string, overwrite: boolean): Promise<void> {
+    if (!overwrite) {
+        const conflicts: string[] = [];
+        await collectMergeConflicts(source, destination, conflicts);
+        if (conflicts.length > 0) {
+            const preview = conflicts.slice(0, 10).join(', ');
+            const suffix = conflicts.length > 10 ? `, and ${conflicts.length - 10} more` : '';
+            throw Object.assign(new Error(`Merge would overwrite ${conflicts.length} existing path(s): ${preview}${suffix}`), { code: 'EEXIST' });
+        }
+    }
+
+    for (const entry of await fs.readdir(source, { withFileTypes: true })) {
+        const sourceChild = path.join(source, entry.name);
+        const destinationChild = path.join(destination, entry.name);
+        const destinationExists = await pathExists(destinationChild);
+
+        if (entry.isDirectory() && destinationExists && (await fs.lstat(destinationChild)).isDirectory()) {
+            await mergeDirectory(sourceChild, destinationChild, overwrite);
+            continue;
+        }
+        if (destinationExists) await fs.rm(destinationChild, { recursive: true });
+        await fs.mkdir(path.dirname(destinationChild), { recursive: true });
+        try {
+            await fs.rename(sourceChild, destinationChild);
+        } catch (err) {
+            if (errorCode(err) !== 'EXDEV') throw err;
+            await fs.cp(sourceChild, destinationChild, { recursive: true, force: overwrite, errorOnExist: !overwrite });
+            await fs.rm(sourceChild, { recursive: true });
+        }
+    }
+    await fs.rmdir(source);
+}
+
+async function moveDirectoryPath(source: string, destination: string, overwrite: boolean): Promise<'moved' | 'merged'> {
+    assertNotNested(source, destination);
+    if (await pathExists(destination)) {
+        const destinationStats = await fs.lstat(destination);
+        if (!destinationStats.isDirectory()) throw new Error(`Destination exists and is not a directory: ${destination}`);
+        await mergeDirectory(source, destination, overwrite);
+        return 'merged';
+    }
+
+    await fs.mkdir(path.dirname(destination), { recursive: true });
+    try {
+        await fs.rename(source, destination);
+    } catch (err) {
+        if (errorCode(err) !== 'EXDEV') throw err;
+        await fs.cp(source, destination, { recursive: true, force: false, errorOnExist: true });
+        await fs.rm(source, { recursive: true });
+    }
+    return 'moved';
+}
+
+function archiveEntryName(filePath: string): string {
+    const name = path.basename(filePath);
+    if (!name || name === path.sep) throw new Error(`Cannot archive a filesystem root directly: ${filePath}`);
+    return name;
+}
+
+async function createZipArchive(filePaths: string[], destination: string, overwrite: boolean): Promise<void> {
+    const absDestination = await resolveAllowedPath(destination);
+    const sources: Array<{ absPath: string; name: string; isDirectory: boolean }> = [];
+    const topLevelNames = new Set<string>();
+
+    for (const filePath of filePaths) {
+        const absPath = await resolveAllowedPath(filePath);
+        const stats = await fs.lstat(absPath);
+        if (!stats.isFile() && !stats.isDirectory()) throw new Error(`Unsupported archive input type: ${filePath}`);
+        const name = archiveEntryName(absPath);
+        if (topLevelNames.has(name)) throw new Error(`Duplicate top-level archive name "${name}". Rename an input or archive it separately.`);
+        topLevelNames.add(name);
+        if (stats.isDirectory() && isWithin(absPath, absDestination)) {
+            throw new Error(`Archive destination cannot be inside an input directory: ${absPath}`);
+        }
+        sources.push({ absPath, name, isDirectory: stats.isDirectory() });
+    }
+
+    if (await pathExists(absDestination)) {
+        if (!overwrite) throw Object.assign(new Error(`Archive already exists: ${absDestination}`), { code: 'EEXIST' });
+        const stats = await fs.lstat(absDestination);
+        if (!stats.isFile()) throw new Error(`Archive destination is not a file: ${absDestination}`);
+    }
+
+    await fs.mkdir(path.dirname(absDestination), { recursive: true });
+    await new Promise<void>((resolve, reject) => {
+        const output = createWriteStream(absDestination, { flags: overwrite ? 'w' : 'wx' });
+        const archive = new ZipArchive({ zlib: { level: 9 } });
+        const fail = (err: Error) => reject(err);
+        output.on('close', resolve);
+        output.on('error', fail);
+        archive.on('error', fail);
+        archive.pipe(output);
+        for (const source of sources) {
+            if (source.isDirectory) archive.directory(source.absPath, source.name);
+            else archive.file(source.absPath, { name: source.name });
+        }
+        void archive.finalize();
+    }).catch(async err => {
+        await fs.rm(absDestination, { force: true }).catch(() => undefined);
+        throw err;
+    });
+}
+
+function safeZipEntryPath(destination: string, entryPath: string): string {
+    const normalized = entryPath.replace(/\\/g, '/');
+    if (normalized.includes('\0') || normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized)) {
+        throw new Error(`Unsafe absolute ZIP entry path: ${entryPath}`);
+    }
+    const target = path.resolve(destination, normalized);
+    if (!isWithin(destination, target)) throw new Error(`Unsafe ZIP entry escapes destination: ${entryPath}`);
+    return target;
+}
+
+async function extractZipArchive(archivePath: string, destination: string | undefined, overwrite: boolean): Promise<string> {
+    const absArchive = await resolveAllowedPath(archivePath);
+    await assertPathType(absArchive, 'file');
+    const defaultDestination = path.join(path.dirname(absArchive), path.basename(absArchive, path.extname(absArchive)));
+    const absDestination = await resolveAllowedPath(destination ?? defaultDestination);
+    const zip = await unzipper.Open.file(absArchive);
+    const entries = [];
+    const archiveTargets = new Set<string>();
+    for (const entry of zip.files) {
+        const target = safeZipEntryPath(absDestination, entry.path);
+        const resolvedTarget = await resolveAllowedPath(target);
+        if (!isWithin(absDestination, resolvedTarget)) {
+            throw new Error(`Unsafe ZIP entry resolves outside destination through a symbolic link: ${entry.path}`);
+        }
+        if (archiveTargets.has(resolvedTarget)) {
+            throw new Error(`ZIP archive contains duplicate destination entries: ${entry.path}`);
+        }
+        archiveTargets.add(resolvedTarget);
+        entries.push({ entry, target: resolvedTarget });
+    }
+
+    const conflicts = [];
+    for (const { entry, target } of entries) {
+        if (!await pathExists(target)) continue;
+        const existingStats = await fs.lstat(target);
+        const typeMatches = entry.type === 'Directory' ? existingStats.isDirectory() : existingStats.isFile();
+        if (!typeMatches) {
+            throw new Error(`ZIP entry type conflicts with existing path: ${target}`);
+        }
+        if (!overwrite && entry.type !== 'Directory') conflicts.push(target);
+    }
+    if (conflicts.length > 0) {
+        throw Object.assign(new Error(`Extraction would overwrite ${conflicts.length} existing file(s): ${conflicts.slice(0, 10).join(', ')}`), { code: 'EEXIST' });
+    }
+
+    await fs.mkdir(absDestination, { recursive: true });
+    for (const { entry, target } of entries) {
+        if (entry.type === 'Directory') {
+            await fs.mkdir(target, { recursive: true });
+            continue;
+        }
+        if (entry.type !== 'File') throw new Error(`Unsupported ZIP entry type for ${entry.path}: ${entry.type}`);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        if (overwrite) await fs.rm(target, { force: true });
+        await new Promise<void>((resolve, reject) => {
+            const output = createWriteStream(target, { flags: 'wx' });
+            entry.stream().on('error', reject).pipe(output).on('error', reject).on('finish', resolve);
+        });
+    }
+    return absDestination;
+}
+
 const server = new McpServer({
     name: 'File Access',
-    version: '1.0.0',
+    version: '1.1.0',
     title: 'File Access',
-    description: 'Safe file access, editing, directory browsing, media reads, and image thumbnails.',
+    description: 'Safe file access, editing, directory browsing, ZIP archives, media reads, and image thumbnails.',
     icons: [{ src: 'https://raw.githubusercontent.com/andreasjhagen/Cynosure-MCPs/main/mcp-file-access/icon.png', mimeType: 'image/png' }],
 });
 
@@ -729,21 +1013,86 @@ server.registerTool(
 server.registerTool(
     'move_file',
     {
-        description: 'Move or rename a file or directory.',
+        description: 'Move or rename a file. If destination is an existing directory, the file is moved into it. Use move_directory for directories.',
         inputSchema: {
-            source: z.string().describe('Source path.'),
-            destination: z.string().describe('Destination path.'),
+            source: z.string().describe('Source file path.'),
+            destination: z.string().describe('Destination file path, or an existing directory that should contain the file.'),
+            overwrite: z.boolean().optional().describe('Replace an existing destination file. Defaults to false.'),
         },
     },
-    async ({ source, destination }) => {
+    async ({ source, destination, overwrite }) => {
         try {
             const absSource = await resolveAllowedPath(source);
             const absDestination = await resolveAllowedPath(destination);
-            await fs.mkdir(path.dirname(absDestination), { recursive: true });
-            await fs.rename(absSource, absDestination);
-            return { content: [{ type: 'text', text: `Moved ${absSource} to ${absDestination}` }] };
+            await assertPathType(absSource, 'file');
+            const finalDestination = await moveFilePath(absSource, absDestination, overwrite ?? false);
+            return { content: [{ type: 'text', text: `Moved ${absSource} to ${finalDestination}` }] };
         } catch (err) {
             return errorResult('Failed to move file', err);
+        }
+    },
+);
+
+server.registerTool(
+    'move_directory',
+    {
+        description: 'Move or rename a directory. If destination already exists as a directory, merge source contents into it after conflict checks.',
+        inputSchema: {
+            source: z.string().describe('Source directory path.'),
+            destination: z.string().describe('Destination directory path. A missing path renames/moves the source; an existing directory receives a merge.'),
+            overwrite: z.boolean().optional().describe('Allow merge conflicts to replace existing destination paths. Defaults to false.'),
+        },
+    },
+    async ({ source, destination, overwrite }) => {
+        try {
+            const absSource = await resolveAllowedPath(source);
+            const absDestination = await resolveAllowedPath(destination);
+            await assertPathType(absSource, 'directory');
+            const operation = await moveDirectoryPath(absSource, absDestination, overwrite ?? false);
+            return { content: [{ type: 'text', text: `${operation === 'merged' ? 'Merged' : 'Moved'} directory ${absSource} ${operation === 'merged' ? 'into' : 'to'} ${absDestination}` }] };
+        } catch (err) {
+            return errorResult('Failed to move directory', err);
+        }
+    },
+);
+
+server.registerTool(
+    'create_zip_archive',
+    {
+        description: 'Create a ZIP archive from one or more files/directories. Inputs keep their top-level names.',
+        inputSchema: {
+            filePaths: z.array(z.string()).min(1).describe('Files and/or directories to include in the ZIP archive.'),
+            destination: z.string().describe('Destination .zip file path.'),
+            overwrite: z.boolean().optional().describe('Replace an existing ZIP file. Defaults to false.'),
+        },
+    },
+    async ({ filePaths, destination, overwrite }) => {
+        try {
+            await createZipArchive(filePaths, destination, overwrite ?? false);
+            const absDestination = await resolveAllowedPath(destination);
+            return { content: [{ type: 'text', text: `Created ZIP archive: ${absDestination}` }] };
+        } catch (err) {
+            return errorResult('Failed to create ZIP archive', err);
+        }
+    },
+);
+
+server.registerTool(
+    'extract_zip_archive',
+    {
+        description: 'Safely extract a ZIP archive. Rejects entries that escape the destination and avoids overwriting files by default.',
+        inputSchema: {
+            archivePath: z.string().describe('ZIP archive file path.'),
+            destination: z.string().optional().describe('Extraction directory. Defaults to a sibling directory named after the archive.'),
+            overwrite: z.boolean().optional().describe('Replace existing destination files. Defaults to false.'),
+        },
+    },
+    async ({ archivePath, destination, overwrite }) => {
+        try {
+            const extractedTo = await extractZipArchive(archivePath, destination, overwrite ?? false);
+            return { content: [{ type: 'text', text: `Extracted ZIP archive to: ${extractedTo}` }] };
+        } catch (err) {
+            return errorResult('Failed to extract ZIP archive', err);
         }
     },
 );
@@ -781,7 +1130,15 @@ server.registerTool(
             const absPath = await resolveAllowedPath(inputPath);
             const stats = await fs.lstat(absPath);
             if (!stats.isDirectory()) throw new Error('Path is not a directory.');
-            await fs.rm(absPath, { recursive: recursive ?? false });
+            if (recursive) {
+                await fs.rm(absPath, { recursive: true });
+            } else {
+                const entries = await fs.readdir(absPath);
+                if (entries.length > 0) {
+                    throw Object.assign(new Error(`Directory is not empty (${entries.length} direct entr${entries.length === 1 ? 'y' : 'ies'}). Recursive deletion is disabled by default.`), { code: 'ENOTEMPTY' });
+                }
+                await fs.rmdir(absPath);
+            }
             return { content: [{ type: 'text', text: `Deleted directory: ${absPath}` }] };
         } catch (err) {
             return errorResult('Failed to delete directory', err);

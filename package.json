@@ -1,8 +1,8 @@
 {
     "name": "@cynosure-mcp/file-access",
     "mcpName": "io.github.andreasjhagen/file-access",
-    "version": "1.0.0",
-    "description": "MCP server for safe file access, editing, directory browsing, and image thumbnails",
+    "version": "1.1.0",
+    "description": "MCP server for safe file access, editing, directory browsing, ZIP archives, and image thumbnails",
     "type": "module",
     "main": "dist/index.js",
     "bin": {
@@ -15,11 +15,15 @@
     },
     "dependencies": {
         "@modelcontextprotocol/sdk": "^1.27.1",
+        "archiver": "^8.0.0",
         "sharp": "^0.34.5",
+        "unzipper": "^0.12.5",
         "zod": "^3.24.0"
     },
     "devDependencies": {
+        "@types/archiver": "^8.0.0",
         "@types/node": "^22.0.0",
+        "@types/unzipper": "^0.10.11",
         "tsx": "^4.19.0",
         "typescript": "^5.7.0"
     },
