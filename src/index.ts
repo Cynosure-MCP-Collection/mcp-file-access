@@ -698,6 +698,7 @@ const server = new McpServer({
 server.registerTool(
     'list_allowed_directories',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'List the absolute directory roots this MCP may access.',
         inputSchema: {},
     },
@@ -709,6 +710,7 @@ server.registerTool(
 server.registerTool(
     'get_file_info',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Get metadata for a file or directory path.',
         inputSchema: { path: z.string().describe('File or directory path.') },
     },
@@ -726,6 +728,7 @@ server.registerTool(
 server.registerTool(
     'list_directory',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'List directory contents, excluding common dependency/build/cache folders by default.',
         inputSchema: { path: z.string().describe('Directory path.') },
     },
@@ -743,6 +746,7 @@ server.registerTool(
 server.registerTool(
     'list_directory_with_sizes',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'List directory contents with recursive directory sizes. Sort by name, size, or modified time.',
         inputSchema: {
             path: z.string().describe('Directory path.'),
@@ -764,6 +768,7 @@ server.registerTool(
 server.registerTool(
     'directory_tree',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Return a JSON directory tree up to a maximum depth, excluding common generated folders by default.',
         inputSchema: {
             path: z.string().describe('Directory path.'),
@@ -785,6 +790,7 @@ server.registerTool(
 server.registerTool(
     'search_files',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Search for files and directories by name/path using a case-insensitive glob-like pattern.',
         inputSchema: {
             path: z.string().describe('Directory path to search.'),
@@ -807,6 +813,7 @@ server.registerTool(
 server.registerTool(
     'read_text_file',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Read a UTF-8 text file. Optionally return only the first head lines or last tail lines.',
         inputSchema: {
             path: z.string().describe('Text file path.'),
@@ -828,6 +835,7 @@ server.registerTool(
 server.registerTool(
     'read_multiple_files',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Read multiple UTF-8 text files in one call.',
         inputSchema: {
             paths: z.array(z.string()).min(1).describe('Text file paths to read.'),
@@ -850,6 +858,7 @@ server.registerTool(
 server.registerTool(
     'read_media_file',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Read a media file. Images are returned inline for model vision; other media is returned as base64 text with MIME metadata.',
         inputSchema: { path: z.string().describe('Media file path.') },
     },
@@ -888,6 +897,7 @@ server.registerTool(
 server.registerTool(
     'get_image_thumbnails',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Create inline PNG thumbnails for multiple image files, each paired with its source name/path for classification workflows.',
         inputSchema: {
             paths: z.array(z.string()).min(1).describe('Image file paths.'),
@@ -918,6 +928,7 @@ server.registerTool(
 server.registerTool(
     'read_multiple_media_files',
     {
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Read up to 6 image files as one medium PNG collage/contact sheet with each file name captioned for comparison or classification.',
         inputSchema: {
             paths: z.array(z.string()).min(1).max(6).describe('Image file paths to include in the collage. Supports PNG, JPEG, WebP, GIF, AVIF, TIFF, BMP, and SVG when supported by sharp.'),
@@ -950,6 +961,7 @@ server.registerTool(
 server.registerTool(
     'write_file',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Write a UTF-8 text file. Set overwrite to true to replace an existing file.',
         inputSchema: {
             path: z.string().describe('File path to write.'),
@@ -972,6 +984,7 @@ server.registerTool(
 server.registerTool(
     'edit_file',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description: 'Apply string replacements to a UTF-8 text file. Use dryRun to preview a unified diff without writing.',
         inputSchema: {
             path: z.string().describe('Text file path.'),
@@ -1004,6 +1017,7 @@ server.registerTool(
 server.registerTool(
     'create_directory',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Create a directory, including parent directories as needed.',
         inputSchema: { path: z.string().describe('Directory path to create.') },
     },
@@ -1021,6 +1035,7 @@ server.registerTool(
 server.registerTool(
     'move_file',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description: 'Move or rename a file. If destination is an existing directory, the file is moved into it. Use move_directory for directories.',
         inputSchema: {
             source: z.string().describe('Source file path.'),
@@ -1075,6 +1090,7 @@ server.registerTool(
 server.registerTool(
     'create_zip_archive',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Create a ZIP archive from one or more files/directories. Inputs keep their top-level names.',
         inputSchema: {
             filePaths: z.array(z.string()).min(1).describe('Files and/or directories to include in the ZIP archive.'),
@@ -1096,6 +1112,7 @@ server.registerTool(
 server.registerTool(
     'extract_zip_archive',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Safely extract a ZIP archive. Rejects entries that escape the destination and avoids overwriting files by default.',
         inputSchema: {
             archivePath: z.string().describe('ZIP archive file path.'),
@@ -1116,6 +1133,7 @@ server.registerTool(
 server.registerTool(
     'delete_file',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Delete a single file.',
         inputSchema: { path: z.string().describe('File path to delete.') },
     },
@@ -1135,6 +1153,7 @@ server.registerTool(
 server.registerTool(
     'delete_directory',
     {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
         description: 'Delete a directory. Set recursive to true to remove non-empty directories.',
         inputSchema: {
             path: z.string().describe('Directory path to delete.'),
