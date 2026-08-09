@@ -408,7 +408,7 @@ function errorHints(prefix: string, err: unknown): string[] {
     if (code === 'EEXIST') hints.push('Choose a different destination, or explicitly enable overwrite when the tool supports it.');
     if (code === 'ENOTDIR') hints.push('A path component expected to be a directory is a file.');
     if (code === 'EISDIR') hints.push('The supplied path is a directory; use the corresponding directory tool.');
-    if (code === 'ENOTEMPTY') hints.push('The destination or directory is not empty. Use the tool’s merge/recursive option if appropriate.');
+    if (code === 'ENOTEMPTY') hints.push('The destination or directory is not empty. Use merge_directory or the recursive deletion option if appropriate.');
     if (message.includes('outside allowed directories') || message.includes('Access denied')) {
         hints.push('Call list_allowed_directories and use a path inside one of the returned roots.');
     }
@@ -416,11 +416,11 @@ function errorHints(prefix: string, err: unknown): string[] {
         hints.push('Path-only deletion is safe for empty directories. For a non-empty directory, retry with {"path":"...","recursive":true}.');
     }
     if (prefix.includes('move file')) {
-        hints.push('move_file accepts files only. To move, rename, or merge a directory, use move_directory.');
+        hints.push('move_file accepts files only. Use move_directory to move or rename a directory, or merge_directory to merge its contents.');
     }
     if (prefix.includes('move directory')) {
         hints.push('Destination is the exact final directory path, not merely its parent. For example, use "/projects/client" rather than "/projects".');
-        hints.push('An existing destination is rejected by default. Set merge to true only when you intentionally want to merge the source contents into it.');
+        hints.push('move_directory requires a new destination path. To combine the source contents with an existing directory, use merge_directory.');
     }
     if (prefix.includes('zip archive')) {
         hints.push('Use .zip paths inside an allowed directory and ensure input paths have distinct top-level names.');
@@ -548,20 +548,14 @@ async function mergeDirectory(source: string, destination: string, overwrite: bo
     await fs.rmdir(source);
 }
 
-async function moveDirectoryPath(source: string, destination: string, merge: boolean, overwrite: boolean): Promise<'moved' | 'merged'> {
+async function moveDirectoryPath(source: string, destination: string): Promise<void> {
     assertNotNested(source, destination);
     if (await pathExists(destination)) {
-        const destinationStats = await fs.lstat(destination);
-        if (!destinationStats.isDirectory()) throw new Error(`Destination exists and is not a directory: ${destination}`);
-        if (!merge) {
-            throw Object.assign(new Error(
-                `Destination directory already exists: ${destination}. ` +
-                `The destination must be the exact new path, including the source directory name. ` +
-                `If you intentionally want to merge the source contents into this existing directory, retry with merge: true.`,
-            ), { code: 'EEXIST' });
-        }
-        await mergeDirectory(source, destination, overwrite);
-        return 'merged';
+        throw Object.assign(new Error(
+            `Destination already exists: ${destination}. ` +
+            `move_directory requires an exact new path, including the source directory name. ` +
+            `Use merge_directory only when you intend to move the source contents into an existing directory.`,
+        ), { code: 'EEXIST' });
     }
 
     await fs.mkdir(path.dirname(destination), { recursive: true });
@@ -572,7 +566,19 @@ async function moveDirectoryPath(source: string, destination: string, merge: boo
         await fs.cp(source, destination, { recursive: true, force: false, errorOnExist: true });
         await fs.rm(source, { recursive: true });
     }
-    return 'moved';
+}
+
+async function mergeDirectoryPath(source: string, destination: string, overwrite: boolean): Promise<void> {
+    assertNotNested(source, destination);
+    if (!await pathExists(destination)) {
+        throw Object.assign(new Error(
+            `Merge destination does not exist: ${destination}. ` +
+            `merge_directory requires an existing destination directory. Use move_directory to move or rename a directory to a new path.`,
+        ), { code: 'ENOENT' });
+    }
+    const destinationStats = await fs.lstat(destination);
+    if (!destinationStats.isDirectory()) throw new Error(`Merge destination is not a directory: ${destination}`);
+    await mergeDirectory(source, destination, overwrite);
 }
 
 function archiveEntryName(filePath: string): string {
@@ -1059,30 +1065,46 @@ server.registerTool(
 server.registerTool(
     'move_directory',
     {
-        description: 'Move or rename a directory to an exact final path. IMPORTANT: destination must include the directory name, not just its existing parent. Existing destinations are rejected unless merge is explicitly true.',
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        description: 'Move or rename a directory to an exact new path. The destination must not exist. To combine contents with an existing directory, use merge_directory instead.',
         inputSchema: {
             source: z.string().describe('Source directory path.'),
             destination: z.string().describe('Exact final directory path, including the moved directory name. Example: to move /clients/acme under /projects, use /projects/acme, not /projects.'),
-            merge: z.boolean().optional().describe('Explicitly merge the source contents into an existing destination directory. Defaults to false. Never enable this merely because the destination parent already exists.'),
-            overwrite: z.boolean().optional().describe('When merge is true, allow conflicts to replace existing destination paths. Defaults to false.'),
-        },
-        annotations: {
-            readOnlyHint: false,
-            destructiveHint: true,
-            idempotentHint: false,
-            openWorldHint: false,
         },
     },
-    async ({ source, destination, merge, overwrite }) => {
+    async ({ source, destination }) => {
         try {
             const absSource = await resolveAllowedPath(source);
             const absDestination = await resolveAllowedPath(destination);
             await assertPathType(absSource, 'directory');
-            if (overwrite && !merge) throw new Error('overwrite is only valid when merge is explicitly true.');
-            const operation = await moveDirectoryPath(absSource, absDestination, merge ?? false, overwrite ?? false);
-            return { content: [{ type: 'text', text: `${operation === 'merged' ? 'Merged' : 'Moved'} directory ${absSource} ${operation === 'merged' ? 'into' : 'to'} ${absDestination}` }] };
+            await moveDirectoryPath(absSource, absDestination);
+            return { content: [{ type: 'text', text: `Moved directory ${absSource} to ${absDestination}` }] };
         } catch (err) {
             return errorResult('Failed to move directory', err);
+        }
+    },
+);
+
+server.registerTool(
+    'merge_directory',
+    {
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+        description: 'Merge the contents of a source directory directly into an existing destination directory, then remove the emptied source directory. Conflicting paths are rejected unless overwrite is explicitly enabled.',
+        inputSchema: {
+            source: z.string().describe('Source directory whose contents should be moved. The source directory itself is removed after a successful merge.'),
+            destination: z.string().describe('Existing destination directory that should directly receive the source contents. Do not append the source directory name.'),
+            overwrite: z.boolean().optional().describe('Replace conflicting destination files or paths. Defaults to false.'),
+        },
+    },
+    async ({ source, destination, overwrite }) => {
+        try {
+            const absSource = await resolveAllowedPath(source);
+            const absDestination = await resolveAllowedPath(destination);
+            await assertPathType(absSource, 'directory');
+            await mergeDirectoryPath(absSource, absDestination, overwrite ?? false);
+            return { content: [{ type: 'text', text: `Merged contents of ${absSource} into ${absDestination} and removed the source directory.` }] };
+        } catch (err) {
+            return errorResult('Failed to merge directory', err);
         }
     },
 );

@@ -32,6 +32,7 @@ On Windows, use `;` as the separator.
 - `create_directory`
 - `move_file`
 - `move_directory`
+- `merge_directory`
 - `create_zip_archive`
 - `extract_zip_archive`
 - `delete_file`
@@ -41,7 +42,11 @@ Common generated and dependency folders such as `node_modules`, `.git`, `dist`, 
 
 `read_multiple_media_files` accepts 1-6 image paths and returns a single PNG collage/contact sheet with file-name captions, which is useful for compact visual comparison and classification.
 
-`move_file` moves files only. When its destination is an existing directory, the file is placed inside that directory. `move_directory` renames or moves a directory when the destination does not exist, and safely merges into an existing destination directory after checking for conflicts. Set `overwrite: true` only when existing destination paths may be replaced.
+`move_file` moves files only. When its destination is an existing directory, the file is placed inside that directory.
+
+`move_directory` moves or renames a whole directory to an exact new path. Its destination must not exist and must include the directory name—for example, use `/projects/acme`, not `/projects`.
+
+`merge_directory` moves the source directory's contents directly into an existing destination directory and removes the emptied source. It checks all conflicts before moving anything and rejects them by default. Set `overwrite: true` only when existing destination paths may be replaced.
 
 `delete_directory` deletes empty directories when only `path` is supplied. Deleting a non-empty directory requires the explicit `recursive: true` option.
 
