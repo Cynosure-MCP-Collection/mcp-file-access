@@ -5,7 +5,7 @@
     "version": "1.1.0",
     "icons": [
         {
-            "src": "https://raw.githubusercontent.com/andreasjhagen/Cynosure-MCPs/main/mcp-file-access/icon.png",
+            "src": "https://unpkg.com/@cynosure-mcp/file-access@1.1.0/icon.png",
             "mimeType": "image/png"
         }
     ],

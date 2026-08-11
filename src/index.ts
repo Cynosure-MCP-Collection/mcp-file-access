@@ -698,7 +698,7 @@ const server = new McpServer({
     version: '1.1.0',
     title: 'File Access',
     description: 'Safe file access, editing, directory browsing, ZIP archives, media reads, and image thumbnails.',
-    icons: [{ src: 'https://raw.githubusercontent.com/andreasjhagen/Cynosure-MCPs/main/mcp-file-access/icon.png', mimeType: 'image/png' }],
+    icons: [{ src: 'https://unpkg.com/@cynosure-mcp/file-access@1.1.0/icon.png', mimeType: 'image/png' }],
 });
 
 server.registerTool(
