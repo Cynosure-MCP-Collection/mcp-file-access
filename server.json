@@ -29,8 +29,7 @@
         }
     ],
     "repository": {
-        "url": "https://github.com/andreasjhagen/Cynosure-MCPs",
-        "source": "github",
-        "subfolder": "mcp-file-access"
+        "url": "https://github.com/Cynosure-MCP-Collection/mcp-file-access",
+        "source": "github"
     }
 }

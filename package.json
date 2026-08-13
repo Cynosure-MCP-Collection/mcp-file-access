@@ -43,5 +43,13 @@
         "image",
         "thumbnails",
         "ai"
-    ]
+    ],
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/Cynosure-MCP-Collection/mcp-file-access.git"
+    },
+    "homepage": "https://github.com/Cynosure-MCP-Collection/mcp-file-access#readme",
+    "bugs": {
+        "url": "https://github.com/Cynosure-MCP-Collection/mcp-file-access/issues"
+    }
 }
