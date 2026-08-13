@@ -13,7 +13,6 @@ jobs:
   publish:
     name: Publish package
     runs-on: ubuntu-latest
-    environment: npm
 
     steps:
       - name: Check out repository
