@@ -35,6 +35,9 @@ jobs:
             exit 1
           fi
 
+      - name: Verify release metadata
+        run: npm run release:check
+
       - name: Install dependencies
         run: npm ci --ignore-scripts
 

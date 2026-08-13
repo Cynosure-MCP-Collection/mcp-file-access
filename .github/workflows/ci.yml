@@ -26,6 +26,9 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Verify release metadata
+        run: npm run release:check
+
       - name: Build
         run: npm run build
 
