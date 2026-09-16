@@ -1,7 +1,7 @@
 {
     "name": "@cynosure-mcp/file-access",
     "mcpName": "io.github.andreasjhagen/file-access",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "MCP server for safe file access, editing, directory browsing, ZIP archives, and image thumbnails",
     "type": "module",
     "main": "dist/index.js",

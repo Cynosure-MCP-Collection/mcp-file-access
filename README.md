@@ -16,38 +16,26 @@ On Windows, use `;` as the separator.
 
 ## Tools
 
-- `list_allowed_directories`
-- `get_file_info`
-- `list_directory`
-- `list_directory_with_sizes`
-- `directory_tree`
-- `search_files`
-- `read_text_file`
-- `read_multiple_files`
-- `read_media_file`
-- `read_multiple_media_files`
-- `get_image_thumbnails`
+- `info` — inspect a path, or list allowed roots when `path` is omitted
+- `list_directory` — flat, size-aware, or tree listings
+- `search` — find files and directories by name/path
+- `read_file` — read one or many text/media files, thumbnails, or an image collage
 - `write_file`
-- `edit_file`
+- `edit_file` — exact replacements with preview-only behavior by default
 - `create_directory`
-- `move_file`
-- `move_directory`
-- `merge_directory`
-- `create_zip_archive`
-- `extract_zip_archive`
-- `delete_file`
-- `delete_directory`
+- `move` — move a file or directory
+- `merge` — merge one directory into another
+- `archive` — create or extract ZIP archives
+- `delete` — delete a file or directory
 
 Common generated and dependency folders such as `node_modules`, `.git`, `dist`, `build`, `.next`, and cache directories are excluded from traversal by default.
 
-`read_multiple_media_files` accepts 1-6 image paths and returns a single PNG collage/contact sheet with file-name captions, which is useful for compact visual comparison and classification.
+`read_file` uses text mode by default. Set `mode` to `media`, `thumbnails`, or `collage` for binary media workflows. Collage mode accepts 1-6 image paths and returns a single PNG contact sheet with file-name captions.
 
-`move_file` moves files only. When its destination is an existing directory, the file is placed inside that directory.
+`move` detects whether its source is a file or directory. For files, an existing destination directory receives the file. For directories, the destination is an exact new path that must not exist and must include the directory name—for example, use `/projects/acme`, not `/projects`.
 
-`move_directory` moves or renames a whole directory to an exact new path. Its destination must not exist and must include the directory name—for example, use `/projects/acme`, not `/projects`.
+`merge` moves the source directory's contents directly into an existing destination directory and removes the emptied source. It checks all conflicts before moving anything and rejects them by default. Set `overwrite: true` only when existing destination paths may be replaced.
 
-`merge_directory` moves the source directory's contents directly into an existing destination directory and removes the emptied source. It checks all conflicts before moving anything and rejects them by default. Set `overwrite: true` only when existing destination paths may be replaced.
+`delete` removes files or empty directories when only `path` is supplied. Deleting a non-empty directory requires the explicit `recursive: true` option.
 
-`delete_directory` deletes empty directories when only `path` is supplied. Deleting a non-empty directory requires the explicit `recursive: true` option.
-
-`extract_zip_archive` validates every archive entry against path traversal and does not overwrite existing files unless `overwrite: true` is supplied.
+`archive` validates every extracted entry against path traversal and does not overwrite existing files unless `overwrite: true` is supplied.

@@ -408,19 +408,16 @@ function errorHints(prefix: string, err: unknown): string[] {
     if (code === 'EEXIST') hints.push('Choose a different destination, or explicitly enable overwrite when the tool supports it.');
     if (code === 'ENOTDIR') hints.push('A path component expected to be a directory is a file.');
     if (code === 'EISDIR') hints.push('The supplied path is a directory; use the corresponding directory tool.');
-    if (code === 'ENOTEMPTY') hints.push('The destination or directory is not empty. Use merge_directory or the recursive deletion option if appropriate.');
+    if (code === 'ENOTEMPTY') hints.push('The destination or directory is not empty. Use merge or the recursive deletion option if appropriate.');
     if (message.includes('outside allowed directories') || message.includes('Access denied')) {
-        hints.push('Call list_allowed_directories and use a path inside one of the returned roots.');
+        hints.push('Call info without a path and use a path inside one of the returned roots.');
     }
     if (prefix.includes('delete directory')) {
         hints.push('Path-only deletion is safe for empty directories. For a non-empty directory, retry with {"path":"...","recursive":true}.');
     }
-    if (prefix.includes('move file')) {
-        hints.push('move_file accepts files only. Use move_directory to move or rename a directory, or merge_directory to merge its contents.');
-    }
-    if (prefix.includes('move directory')) {
+    if (prefix.includes('move')) {
         hints.push('Destination is the exact final directory path, not merely its parent. For example, use "/projects/client" rather than "/projects".');
-        hints.push('move_directory requires a new destination path. To combine the source contents with an existing directory, use merge_directory.');
+        hints.push('Moving a directory requires a new destination path. To combine the source contents with an existing directory, use merge.');
     }
     if (prefix.includes('zip archive')) {
         hints.push('Use .zip paths inside an allowed directory and ensure input paths have distinct top-level names.');
@@ -457,7 +454,7 @@ async function assertPathType(candidate: string, expected: 'file' | 'directory')
     const stats = await fs.lstat(candidate);
     const matches = expected === 'file' ? stats.isFile() : stats.isDirectory();
     if (!matches) {
-        throw new Error(`Source path is not a ${expected}. ${expected === 'file' ? 'Use move_directory for directories.' : 'Use move_file for files.'}`);
+        throw new Error(`Path is not a ${expected}.`);
     }
 }
 
@@ -553,8 +550,8 @@ async function moveDirectoryPath(source: string, destination: string): Promise<v
     if (await pathExists(destination)) {
         throw Object.assign(new Error(
             `Destination already exists: ${destination}. ` +
-            `move_directory requires an exact new path, including the source directory name. ` +
-            `Use merge_directory only when you intend to move the source contents into an existing directory.`,
+            `move requires an exact new path, including the source directory name. ` +
+            `Use merge only when you intend to move the source contents into an existing directory.`,
         ), { code: 'EEXIST' });
     }
 
@@ -573,7 +570,7 @@ async function mergeDirectoryPath(source: string, destination: string, overwrite
     if (!await pathExists(destination)) {
         throw Object.assign(new Error(
             `Merge destination does not exist: ${destination}. ` +
-            `merge_directory requires an existing destination directory. Use move_directory to move or rename a directory to a new path.`,
+            `merge requires an existing destination directory. Use move to move or rename a directory to a new path.`,
         ), { code: 'ENOENT' });
     }
     const destinationStats = await fs.lstat(destination);
@@ -695,33 +692,24 @@ async function extractZipArchive(archivePath: string, destination: string | unde
 
 const server = new McpServer({
     name: 'File Access',
-    version: '1.1.0',
+    version: '1.1.1',
     title: 'File Access',
     description: 'Safe file access, editing, directory browsing, ZIP archives, media reads, and image thumbnails.',
-    icons: [{ src: 'https://unpkg.com/@cynosure-mcp/file-access@1.1.0/icon.png', mimeType: 'image/png' }],
+    icons: [{ src: 'https://unpkg.com/@cynosure-mcp/file-access@1.1.1/icon.png', mimeType: 'image/png' }],
 });
 
 server.registerTool(
-    'list_allowed_directories',
+    'info',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'List the absolute directory roots this MCP may access.',
-        inputSchema: {},
-    },
-    async () => ({
-        content: [{ type: 'text', text: JSON.stringify({ allowedDirectories: ALLOWED_DIRECTORIES }, null, 2) }],
-    }),
-);
-
-server.registerTool(
-    'get_file_info',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Get metadata for a file or directory path.',
-        inputSchema: { path: z.string().describe('File or directory path.') },
+        description: 'Get metadata for a file or directory. Omit path to list the directory roots this MCP may access.',
+        inputSchema: { path: z.string().optional().describe('File or directory path. Omit to list allowed directory roots.') },
     },
     async ({ path: inputPath }) => {
         try {
+            if (inputPath === undefined) {
+                return { content: [{ type: 'text', text: JSON.stringify({ allowedDirectories: ALLOWED_DIRECTORIES }, null, 2) }] };
+            }
             const absPath = await resolveAllowedPath(inputPath);
             const info = await toFileEntry(absPath);
             return { content: [{ type: 'text', text: JSON.stringify(info, null, 2) }] };
@@ -735,14 +723,28 @@ server.registerTool(
     'list_directory',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'List directory contents, excluding common dependency/build/cache folders by default.',
-        inputSchema: { path: z.string().describe('Directory path.') },
+        description: 'List directory contents or return a directory tree. Common dependency/build/cache folders are excluded by default.',
+        inputSchema: {
+            path: z.string().describe('Directory path.'),
+            tree: z.boolean().optional().describe('Return a nested tree instead of a flat listing. Defaults to false.'),
+            depth: z.number().int().min(0).max(10).optional().describe('Tree depth. Used only when tree is true; defaults to 3.'),
+            includeSizes: z.boolean().optional().describe('Calculate recursive directory sizes for a flat listing. Defaults to false.'),
+            sortBy: z.enum(['name', 'size', 'modified']).optional().describe('Sort a flat listing. Defaults to name.'),
+            excludePatterns: z.array(z.string()).optional().describe('Additional patterns to exclude from a tree.'),
+        },
     },
-    async ({ path: inputPath }) => {
+    async ({ path: inputPath, tree, depth, includeSizes, sortBy, excludePatterns }) => {
         try {
             const absPath = await resolveAllowedPath(inputPath);
-            const entries = await readDirectoryEntries(absPath);
-            return { content: [{ type: 'text', text: JSON.stringify(entries, null, 2) }] };
+            if (tree) {
+                const result = await buildTree(absPath, depth ?? 3, excludePatterns ?? []);
+                return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+            }
+            const entries = await readDirectoryEntries(absPath, includeSizes ?? false, sortBy);
+            const result = includeSizes
+                ? entries.map(entry => ({ ...entry, sizeHuman: formatBytes(entry.size) }))
+                : entries;
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
         } catch (err) {
             return errorResult('Failed to list directory', err);
         }
@@ -750,51 +752,7 @@ server.registerTool(
 );
 
 server.registerTool(
-    'list_directory_with_sizes',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'List directory contents with recursive directory sizes. Sort by name, size, or modified time.',
-        inputSchema: {
-            path: z.string().describe('Directory path.'),
-            sortBy: z.enum(['name', 'size', 'modified']).optional().describe('Sort entries by name, size, or modified time. Defaults to name.'),
-        },
-    },
-    async ({ path: inputPath, sortBy }) => {
-        try {
-            const absPath = await resolveAllowedPath(inputPath);
-            const entries = await readDirectoryEntries(absPath, true, sortBy);
-            const enriched = entries.map(entry => ({ ...entry, sizeHuman: formatBytes(entry.size) }));
-            return { content: [{ type: 'text', text: JSON.stringify(enriched, null, 2) }] };
-        } catch (err) {
-            return errorResult('Failed to list directory with sizes', err);
-        }
-    },
-);
-
-server.registerTool(
-    'directory_tree',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Return a JSON directory tree up to a maximum depth, excluding common generated folders by default.',
-        inputSchema: {
-            path: z.string().describe('Directory path.'),
-            depth: z.number().int().min(0).max(10).optional().describe('Maximum depth to traverse. Defaults to 3.'),
-            excludePatterns: z.array(z.string()).optional().describe('Additional file, directory, or glob-like patterns to exclude.'),
-        },
-    },
-    async ({ path: inputPath, depth, excludePatterns }) => {
-        try {
-            const absPath = await resolveAllowedPath(inputPath);
-            const tree = await buildTree(absPath, depth ?? 3, excludePatterns ?? []);
-            return { content: [{ type: 'text', text: JSON.stringify(tree, null, 2) }] };
-        } catch (err) {
-            return errorResult('Failed to build directory tree', err);
-        }
-    },
-);
-
-server.registerTool(
-    'search_files',
+    'search',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
         description: 'Search for files and directories by name/path using a case-insensitive glob-like pattern.',
@@ -817,149 +775,77 @@ server.registerTool(
 );
 
 server.registerTool(
-    'read_text_file',
+    'read_file',
     {
         annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Read a UTF-8 text file. Optionally return only the first head lines or last tail lines.',
+        description: 'Read one or more text or media files. Text is the default; use mode for media, thumbnails, or an image collage.',
         inputSchema: {
-            path: z.string().describe('Text file path.'),
+            path: z.string().optional().describe('One file path. Use either path or paths.'),
+            paths: z.array(z.string()).min(1).max(100).optional().describe('One or more file paths. Use either path or paths.'),
+            mode: z.enum(['text', 'media', 'thumbnails', 'collage']).optional().describe('Read mode. Defaults to text. Thumbnails and collage require images.'),
             head: z.number().int().positive().optional().describe('Return only the first N lines.'),
             tail: z.number().int().positive().optional().describe('Return only the last N lines.'),
+            size: z.number().int().min(32).max(1024).optional().describe('Thumbnail size in pixels. Defaults to 256.'),
+            tileSize: z.number().int().min(160).max(512).optional().describe('Collage tile size in pixels. Defaults to 320.'),
         },
     },
-    async ({ path: inputPath, head, tail }) => {
+    async ({ path: inputPath, paths, mode, head, tail, size, tileSize }) => {
         try {
-            const absPath = await resolveAllowedPath(inputPath);
-            const text = await readText(absPath, head, tail);
-            return { content: [{ type: 'text', text }] };
-        } catch (err) {
-            return errorResult('Failed to read text file', err);
-        }
-    },
-);
-
-server.registerTool(
-    'read_multiple_files',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Read multiple UTF-8 text files in one call.',
-        inputSchema: {
-            paths: z.array(z.string()).min(1).describe('Text file paths to read.'),
-        },
-    },
-    async ({ paths }) => {
-        try {
-            const files = [];
-            for (const filePath of paths) {
-                const absPath = await resolveAllowedPath(filePath);
-                files.push({ path: absPath, content: await readText(absPath) });
+            if ((inputPath === undefined) === (paths === undefined)) {
+                throw new Error('Provide exactly one of path or paths.');
             }
-            return { content: [{ type: 'text', text: JSON.stringify(files, null, 2) }] };
-        } catch (err) {
-            return errorResult('Failed to read multiple files', err);
-        }
-    },
-);
+            const requestedPaths = inputPath === undefined ? paths! : [inputPath];
+            const readMode = mode ?? 'text';
 
-server.registerTool(
-    'read_media_file',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Read a media file. Images are returned inline for model vision; other media is returned as base64 text with MIME metadata.',
-        inputSchema: { path: z.string().describe('Media file path.') },
-    },
-    async ({ path: inputPath }) => {
-        try {
-            const absPath = await resolveAllowedPath(inputPath);
-            const stats = await fs.stat(absPath);
-            if (stats.size > MAX_MEDIA_BYTES) {
-                throw new Error(`Media file is too large (${formatBytes(stats.size)}). Limit is ${formatBytes(MAX_MEDIA_BYTES)}.`);
-            }
-            const data = await fs.readFile(absPath);
-            const mimeType = mimeForPath(absPath);
-            const metadata = { path: absPath, mimeType, size: stats.size, sizeHuman: formatBytes(stats.size) };
-
-            if (isImagePath(absPath)) {
+            if (readMode === 'collage') {
+                const collage = await createImageCollage(requestedPaths, tileSize ?? 320);
                 return {
                     content: [
-                        { type: 'text', text: JSON.stringify(metadata, null, 2) },
-                        { type: 'image', data: data.toString('base64'), mimeType },
+                        { type: 'text', text: JSON.stringify({ mimeType: 'image/png', width: collage.width, height: collage.height, files: collage.files }, null, 2) },
+                        { type: 'image', data: collage.data.toString('base64'), mimeType: 'image/png' },
                     ],
                 };
             }
 
-            return {
-                content: [{
-                    type: 'text',
-                    text: JSON.stringify({ ...metadata, base64: data.toString('base64') }, null, 2),
-                }],
-            };
-        } catch (err) {
-            return errorResult('Failed to read media file', err);
-        }
-    },
-);
-
-server.registerTool(
-    'get_image_thumbnails',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Create inline PNG thumbnails for multiple image files, each paired with its source name/path for classification workflows.',
-        inputSchema: {
-            paths: z.array(z.string()).min(1).describe('Image file paths.'),
-            size: z.number().int().min(32).max(1024).optional().describe('Maximum thumbnail width/height in pixels. Defaults to 256.'),
-        },
-    },
-    async ({ paths, size }) => {
-        try {
-            const content = [];
-            for (const filePath of paths) {
-                const absPath = await resolveAllowedPath(filePath);
-                if (!isImagePath(absPath)) throw new Error(`Not a supported image file: ${filePath}`);
-                const thumb = await sharp(absPath)
-                    .rotate()
-                    .resize({ width: size ?? 256, height: size ?? 256, fit: 'inside', withoutEnlargement: true })
-                    .png()
-                    .toBuffer();
-                content.push({ type: 'text' as const, text: JSON.stringify({ name: path.basename(absPath), path: absPath, mimeType: 'image/png' }) });
-                content.push({ type: 'image' as const, data: thumb.toString('base64'), mimeType: 'image/png' });
+            if (readMode === 'thumbnails') {
+                const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [];
+                for (const filePath of requestedPaths) {
+                    const absPath = await resolveAllowedPath(filePath);
+                    if (!isImagePath(absPath)) throw new Error(`Not a supported image file: ${filePath}`);
+                    const thumb = await sharp(absPath).rotate().resize({ width: size ?? 256, height: size ?? 256, fit: 'inside', withoutEnlargement: true }).png().toBuffer();
+                    content.push({ type: 'text', text: JSON.stringify({ name: path.basename(absPath), path: absPath, mimeType: 'image/png' }) });
+                    content.push({ type: 'image', data: thumb.toString('base64'), mimeType: 'image/png' });
+                }
+                return { content };
             }
-            return { content };
-        } catch (err) {
-            return errorResult('Failed to create thumbnails', err);
-        }
-    },
-);
 
-server.registerTool(
-    'read_multiple_media_files',
-    {
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
-        description: 'Read up to 6 image files as one medium PNG collage/contact sheet with each file name captioned for comparison or classification.',
-        inputSchema: {
-            paths: z.array(z.string()).min(1).max(6).describe('Image file paths to include in the collage. Supports PNG, JPEG, WebP, GIF, AVIF, TIFF, BMP, and SVG when supported by sharp.'),
-            tileSize: z.number().int().min(160).max(512).optional().describe('Maximum image tile width/height in pixels. Defaults to 320.'),
-        },
-    },
-    async ({ paths, tileSize }) => {
-        try {
-            const collage = await createImageCollage(paths, tileSize ?? 320);
-            return {
-                content: [
-                    {
-                        type: 'text',
-                        text: JSON.stringify({
-                            mimeType: 'image/png',
-                            width: collage.width,
-                            height: collage.height,
-                            files: collage.files,
-                        }, null, 2),
-                    },
-                    { type: 'image', data: collage.data.toString('base64'), mimeType: 'image/png' },
-                ],
-            };
+            if (readMode === 'media') {
+                const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [];
+                for (const filePath of requestedPaths) {
+                    const absPath = await resolveAllowedPath(filePath);
+                    const stats = await fs.stat(absPath);
+                    if (stats.size > MAX_MEDIA_BYTES) throw new Error(`Media file is too large (${formatBytes(stats.size)}). Limit is ${formatBytes(MAX_MEDIA_BYTES)}.`);
+                    const data = await fs.readFile(absPath);
+                    const mimeType = mimeForPath(absPath);
+                    const metadata = { path: absPath, mimeType, size: stats.size, sizeHuman: formatBytes(stats.size) };
+                    if (isImagePath(absPath)) {
+                        content.push({ type: 'text', text: JSON.stringify(metadata, null, 2) });
+                        content.push({ type: 'image', data: data.toString('base64'), mimeType });
+                    } else {
+                        content.push({ type: 'text', text: JSON.stringify({ ...metadata, base64: data.toString('base64') }, null, 2) });
+                    }
+                }
+                return { content };
+            }
+
+            const files = [];
+            for (const filePath of requestedPaths) {
+                const absPath = await resolveAllowedPath(filePath);
+                files.push({ path: absPath, content: await readText(absPath, head, tail) });
+            }
+            return { content: [{ type: 'text', text: files.length === 1 ? files[0].content : JSON.stringify(files, null, 2) }] };
         } catch (err) {
-            return errorResult('Failed to read multiple media files', err);
+            return errorResult('Failed to read file', err);
         }
     },
 );
@@ -991,7 +877,7 @@ server.registerTool(
     'edit_file',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-        description: 'Apply string replacements to a UTF-8 text file. Use dryRun to preview a unified diff without writing.',
+        description: 'Apply exact string replacements to a UTF-8 text file. Preview-only by default; set dryRun to false to write.',
         inputSchema: {
             path: z.string().describe('Text file path.'),
             edits: z.array(z.object({
@@ -999,7 +885,7 @@ server.registerTool(
                 newText: z.string().describe('Replacement text.'),
                 replaceAll: z.boolean().optional().describe('Replace all occurrences. Defaults to false.'),
             })).min(1).describe('Replacement edits to apply in order.'),
-            dryRun: z.boolean().optional().describe('Preview changes without writing. Defaults to false.'),
+            dryRun: z.boolean().optional().describe('Preview changes without writing. Defaults to true; explicitly set false to write.'),
         },
     },
     async ({ path: inputPath, edits, dryRun }) => {
@@ -1012,8 +898,9 @@ server.registerTool(
                 updated = edit.replaceAll ? updated.split(edit.oldText).join(edit.newText) : updated.replace(edit.oldText, edit.newText);
             }
             const diff = unifiedDiff(original, updated);
-            if (!dryRun) await fs.writeFile(absPath, updated, 'utf8');
-            return { content: [{ type: 'text', text: `${dryRun ? 'Dry run only.' : `Edited file: ${absPath}`}\n\n${diff}` }] };
+            const previewOnly = dryRun ?? true;
+            if (!previewOnly) await fs.writeFile(absPath, updated, 'utf8');
+            return { content: [{ type: 'text', text: `${previewOnly ? 'Dry run only.' : `Edited file: ${absPath}`}\n\n${diff}` }] };
         } catch (err) {
             return errorResult('Failed to edit file', err);
         }
@@ -1039,54 +926,39 @@ server.registerTool(
 );
 
 server.registerTool(
-    'move_file',
+    'move',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-        description: 'Move or rename a file. If destination is an existing directory, the file is moved into it. Use move_directory for directories.',
+        description: 'Move or rename a file or directory. Files may target an existing directory; directory destinations are exact new paths and must not exist.',
         inputSchema: {
-            source: z.string().describe('Source file path.'),
-            destination: z.string().describe('Destination file path, or an existing directory that should contain the file.'),
-            overwrite: z.boolean().optional().describe('Replace an existing destination file. Defaults to false.'),
+            source: z.string().describe('Source file or directory path.'),
+            destination: z.string().describe('Destination path. For a directory, provide the exact new path including its name.'),
+            overwrite: z.boolean().optional().describe('Replace an existing destination file. Applies only when moving files; defaults to false.'),
         },
     },
     async ({ source, destination, overwrite }) => {
         try {
             const absSource = await resolveAllowedPath(source);
             const absDestination = await resolveAllowedPath(destination);
-            await assertPathType(absSource, 'file');
-            const finalDestination = await moveFilePath(absSource, absDestination, overwrite ?? false);
-            return { content: [{ type: 'text', text: `Moved ${absSource} to ${finalDestination}` }] };
+            const stats = await fs.lstat(absSource);
+            if (stats.isFile()) {
+                const finalDestination = await moveFilePath(absSource, absDestination, overwrite ?? false);
+                return { content: [{ type: 'text', text: `Moved ${absSource} to ${finalDestination}` }] };
+            }
+            if (stats.isDirectory()) {
+                if (overwrite) throw new Error('overwrite is only supported when moving files. Use merge to combine directories.');
+                await moveDirectoryPath(absSource, absDestination);
+                return { content: [{ type: 'text', text: `Moved directory ${absSource} to ${absDestination}` }] };
+            }
+            throw new Error('Source path is neither a regular file nor a directory.');
         } catch (err) {
-            return errorResult('Failed to move file', err);
+            return errorResult('Failed to move', err);
         }
     },
 );
 
 server.registerTool(
-    'move_directory',
-    {
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-        description: 'Move or rename a directory to an exact new path. The destination must not exist. To combine contents with an existing directory, use merge_directory instead.',
-        inputSchema: {
-            source: z.string().describe('Source directory path.'),
-            destination: z.string().describe('Exact final directory path, including the moved directory name. Example: to move /clients/acme under /projects, use /projects/acme, not /projects.'),
-        },
-    },
-    async ({ source, destination }) => {
-        try {
-            const absSource = await resolveAllowedPath(source);
-            const absDestination = await resolveAllowedPath(destination);
-            await assertPathType(absSource, 'directory');
-            await moveDirectoryPath(absSource, absDestination);
-            return { content: [{ type: 'text', text: `Moved directory ${absSource} to ${absDestination}` }] };
-        } catch (err) {
-            return errorResult('Failed to move directory', err);
-        }
-    },
-);
-
-server.registerTool(
-    'merge_directory',
+    'merge',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
         description: 'Merge the contents of a source directory directly into an existing destination directory, then remove the emptied source directory. Conflicting paths are rejected unless overwrite is explicitly enabled.',
@@ -1110,95 +982,70 @@ server.registerTool(
 );
 
 server.registerTool(
-    'create_zip_archive',
+    'archive',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-        description: 'Create a ZIP archive from one or more files/directories. Inputs keep their top-level names.',
+        description: 'Create or safely extract a ZIP archive. Extraction rejects path traversal and does not overwrite by default.',
         inputSchema: {
-            filePaths: z.array(z.string()).min(1).describe('Files and/or directories to include in the ZIP archive.'),
-            destination: z.string().describe('Destination .zip file path.'),
-            overwrite: z.boolean().optional().describe('Replace an existing ZIP file. Defaults to false.'),
+            action: z.enum(['create', 'extract']).describe('Archive operation.'),
+            filePaths: z.array(z.string()).min(1).optional().describe('Create only: files/directories to include.'),
+            archivePath: z.string().optional().describe('Extract only: ZIP archive path.'),
+            destination: z.string().optional().describe('Create: required destination .zip path. Extract: optional output directory.'),
+            overwrite: z.boolean().optional().describe('Replace an existing archive or extracted files. Defaults to false.'),
         },
     },
-    async ({ filePaths, destination, overwrite }) => {
+    async ({ action, filePaths, archivePath, destination, overwrite }) => {
         try {
-            await createZipArchive(filePaths, destination, overwrite ?? false);
-            const absDestination = await resolveAllowedPath(destination);
-            return { content: [{ type: 'text', text: `Created ZIP archive: ${absDestination}` }] };
-        } catch (err) {
-            return errorResult('Failed to create ZIP archive', err);
-        }
-    },
-);
-
-server.registerTool(
-    'extract_zip_archive',
-    {
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-        description: 'Safely extract a ZIP archive. Rejects entries that escape the destination and avoids overwriting files by default.',
-        inputSchema: {
-            archivePath: z.string().describe('ZIP archive file path.'),
-            destination: z.string().optional().describe('Extraction directory. Defaults to a sibling directory named after the archive.'),
-            overwrite: z.boolean().optional().describe('Replace existing destination files. Defaults to false.'),
-        },
-    },
-    async ({ archivePath, destination, overwrite }) => {
-        try {
+            if (action === 'create') {
+                if (!filePaths || !destination) throw new Error('Creating an archive requires filePaths and destination.');
+                if (archivePath !== undefined) throw new Error('archivePath is only valid when extracting an archive.');
+                await createZipArchive(filePaths, destination, overwrite ?? false);
+                const absDestination = await resolveAllowedPath(destination);
+                return { content: [{ type: 'text', text: `Created ZIP archive: ${absDestination}` }] };
+            }
+            if (!archivePath) throw new Error('Extracting an archive requires archivePath.');
+            if (filePaths !== undefined) throw new Error('filePaths is only valid when creating an archive.');
             const extractedTo = await extractZipArchive(archivePath, destination, overwrite ?? false);
             return { content: [{ type: 'text', text: `Extracted ZIP archive to: ${extractedTo}` }] };
         } catch (err) {
-            return errorResult('Failed to extract ZIP archive', err);
+            return errorResult('Failed to process ZIP archive', err);
         }
     },
 );
 
 server.registerTool(
-    'delete_file',
+    'delete',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-        description: 'Delete a single file.',
-        inputSchema: { path: z.string().describe('File path to delete.') },
-    },
-    async ({ path: inputPath }) => {
-        try {
-            const absPath = await resolveAllowedPath(inputPath);
-            const stats = await fs.lstat(absPath);
-            if (!stats.isFile()) throw new Error('Path is not a file.');
-            await fs.unlink(absPath);
-            return { content: [{ type: 'text', text: `Deleted file: ${absPath}` }] };
-        } catch (err) {
-            return errorResult('Failed to delete file', err);
-        }
-    },
-);
-
-server.registerTool(
-    'delete_directory',
-    {
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
-        description: 'Delete a directory. Set recursive to true to remove non-empty directories.',
+        description: 'Delete a file or directory. Non-empty directories require recursive: true.',
         inputSchema: {
-            path: z.string().describe('Directory path to delete.'),
-            recursive: z.boolean().optional().describe('Delete directory contents recursively. Defaults to false.'),
+            path: z.string().describe('File or directory path to delete.'),
+            recursive: z.boolean().optional().describe('Delete a non-empty directory recursively. Defaults to false and is ignored for files.'),
         },
     },
     async ({ path: inputPath, recursive }) => {
         try {
             const absPath = await resolveAllowedPath(inputPath);
             const stats = await fs.lstat(absPath);
-            if (!stats.isDirectory()) throw new Error('Path is not a directory.');
-            if (recursive) {
-                await fs.rm(absPath, { recursive: true });
-            } else {
-                const entries = await fs.readdir(absPath);
-                if (entries.length > 0) {
-                    throw Object.assign(new Error(`Directory is not empty (${entries.length} direct entr${entries.length === 1 ? 'y' : 'ies'}). Recursive deletion is disabled by default.`), { code: 'ENOTEMPTY' });
-                }
-                await fs.rmdir(absPath);
+            if (stats.isFile()) {
+                await fs.unlink(absPath);
+                return { content: [{ type: 'text', text: `Deleted file: ${absPath}` }] };
             }
-            return { content: [{ type: 'text', text: `Deleted directory: ${absPath}` }] };
+            if (stats.isDirectory()) {
+                if (recursive) {
+                    await fs.rm(absPath, { recursive: true });
+                } else {
+                    const entries = await fs.readdir(absPath);
+                    if (entries.length > 0) {
+                        throw Object.assign(new Error(`Directory is not empty (${entries.length} direct entr${entries.length === 1 ? 'y' : 'ies'}). Recursive deletion is disabled by default.`), { code: 'ENOTEMPTY' });
+                    }
+                    await fs.rmdir(absPath);
+                }
+                return { content: [{ type: 'text', text: `Deleted directory: ${absPath}` }] };
+            }
+            throw new Error('Path is neither a regular file nor a directory.');
         } catch (err) {
-            return errorResult('Failed to delete directory', err);
+            return errorResult('Failed to delete', err);
         }
     },
 );
