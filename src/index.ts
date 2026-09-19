@@ -877,14 +877,28 @@ server.registerTool(
     'edit_file',
     {
         annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
-        description: 'Apply exact string replacements to a UTF-8 text file. Preview-only by default; set dryRun to false to write.',
+        description: 'Sed-like editing for a UTF-8 text file: apply ordered, exact oldText-to-newText replacements. Pass path plus an edits array; do not pass a unified diff or patch string. Preview-only by default; set dryRun to false to write.',
         inputSchema: {
-            path: z.string().describe('Text file path.'),
+            path: z.string({
+                required_error: 'Required parameter "path" is missing. Use {"path":"/path/to/file","edits":[{"oldText":"exact text","newText":"replacement"}]}; the parameter is named "path", not "file", "filePath", or "file_path".',
+                invalid_type_error: 'Parameter "path" must be a string containing the text file path.',
+            }).describe('Text file path. The parameter name is path (not file, filePath, or file_path).'),
             edits: z.array(z.object({
-                oldText: z.string().describe('Exact text to replace.'),
-                newText: z.string().describe('Replacement text.'),
+                oldText: z.string({
+                    required_error: 'Each edit requires an "oldText" string containing the exact text to find.',
+                    invalid_type_error: 'Each edit\'s "oldText" must be a string.',
+                }).describe('Exact literal text to find, like the search expression in sed.'),
+                newText: z.string({
+                    required_error: 'Each edit requires a "newText" string containing the replacement text.',
+                    invalid_type_error: 'Each edit\'s "newText" must be a string.',
+                }).describe('Literal replacement text, like the replacement expression in sed.'),
                 replaceAll: z.boolean().optional().describe('Replace all occurrences. Defaults to false.'),
-            })).min(1).describe('Replacement edits to apply in order.'),
+            }, {
+                invalid_type_error: 'Each item in "edits" must be an object shaped like {"oldText":"exact text","newText":"replacement","replaceAll":false}.',
+            }), {
+                required_error: 'Required parameter "edits" is missing. It must be an array such as [{"oldText":"exact text","newText":"replacement"}].',
+                invalid_type_error: 'Parameter "edits" must be an array of objects, for example [{"oldText":"exact text","newText":"replacement"}]. Do not pass a unified diff or patch string.',
+            }).min(1, 'Parameter "edits" must contain at least one {"oldText":"...","newText":"..."} object.').describe('Ordered sed-like replacements. Example: [{"oldText":"exact text","newText":"replacement","replaceAll":false}].'),
             dryRun: z.boolean().optional().describe('Preview changes without writing. Defaults to true; explicitly set false to write.'),
         },
     },

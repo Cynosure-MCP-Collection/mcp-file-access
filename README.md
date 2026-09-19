@@ -21,7 +21,7 @@ On Windows, use `;` as the separator.
 - `search` — find files and directories by name/path
 - `read_file` — read one or many text/media files, thumbnails, or an image collage
 - `write_file`
-- `edit_file` — exact replacements with preview-only behavior by default
+- `edit_file` — sed-like ordered, exact-text replacements with preview-only behavior by default
 - `create_directory`
 - `move` — move a file or directory
 - `merge` — merge one directory into another
@@ -31,6 +31,8 @@ On Windows, use `;` as the separator.
 Common generated and dependency folders such as `node_modules`, `.git`, `dist`, `build`, `.next`, and cache directories are excluded from traversal by default.
 
 `read_file` uses text mode by default. Set `mode` to `media`, `thumbnails`, or `collage` for binary media workflows. Collage mode accepts 1-6 image paths and returns a single PNG contact sheet with file-name captions.
+
+`edit_file` works like `sed`: provide `path` and an `edits` array of `{ "oldText": "exact text", "newText": "replacement" }` objects. Edits are applied in order. Set `replaceAll: true` on an edit to replace every occurrence, and set `dryRun: false` on the tool call to write the result. It accepts literal replacements, not unified diffs or patch strings.
 
 `move` detects whether its source is a file or directory. For files, an existing destination directory receives the file. For directories, the destination is an exact new path that must not exist and must include the directory name—for example, use `/projects/acme`, not `/projects`.
 
